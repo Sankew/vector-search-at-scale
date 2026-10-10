@@ -1,62 +1,122 @@
 # Vector search at scale
 
-[![Checks](https://github.com/Sankew/vector-search-at-scale/actions/workflows/checks.yml/badge.svg)](https://github.com/Sankew/vector-search-at-scale/actions/workflows/checks.yml)
+[![Checks](https://github.com/Sankew/vector-search-at-scale/actions/workflows/checks.yml/badge.svg?branch=p2-benchmark)](https://github.com/Sankew/vector-search-at-scale/actions?query=branch%3Ap2-benchmark)
 
-How much recall does each FAISS index give up for speed and memory? This benchmark measures recall@10, single-query p95 latency, batch throughput and memory for three index families on one dataset, at 100k, 250k and 1M vectors:
+This benchmark compares the recall, latency and storage requirements of three FAISS index families. It provides a repeatable experiment at 100,000, 250,000 and 1,000,000 vectors, with exact search as the reference.
 
-- **HNSW (float32)**, swept over M ∈ {16, 32, 64} × efConstruction ∈ {100, 200} × efSearch ∈ {16 … 512}
-- **HNSW-SQ8**, 8-bit scalar quantization (about 4× smaller vectors)
-- **Binary + rescore**, sign-bit codes searched by Hamming distance, with the top k × oversample candidates rescored against float vectors. The float rescoring store is counted in the memory figure.
+**Status:** automated tests and a small synthetic run pass CI. The million-vector benchmark on real embeddings is pending. Synthetic runs validate the implementation and reporting; they do not establish performance on the real dataset.
+
+## Indexes compared
+
+| Index | Search method | Storage counted |
+|---|---|---|
+| HNSW with float32 vectors | Approximate graph search using inner product | Serialized graph and float vectors |
+| HNSW-SQ8 | Approximate graph search with 8-bit scalar-quantized vectors | Serialized graph and quantized vectors |
+| Binary with float rescoring | Exact Hamming search over sign-bit codes, followed by inner-product rescoring of selected candidates | Serialized binary index plus the float32 rescoring store |
+
+SQ8 reduces the vector representation to 8 bits per dimension; graph overhead remains. The binary method retains float vectors for rescoring, so the size of its binary codes alone would understate its storage requirement.
 
 ```mermaid
 flowchart LR
-    D[Cohere Wikipedia<br/>768-d embeddings] --> N[L2-normalize] --> S[Hold out<br/>1,000 queries]
-    S --> G[Exact top-10<br/>ground truth]
-    S --> B[Build index<br/>all cores]
-    B --> M[Search, 1 thread<br/>3 runs, median p95]
-    G --> M --> R[runs_*.csv → Pareto plots<br/>+ summary table]
+    D[Load embeddings] --> N[L2-normalize and shuffle]
+    N --> Q[Hold out 1,000 query vectors]
+    N --> B[Base vectors at each scale]
+    Q --> G[Exact top-10 reference]
+    B --> G
+    B --> I[Build FAISS indexes]
+    Q --> M[Measure recall, latency and throughput]
+    I --> M
+    G --> M
+    M --> R[CSV files, summary and Pareto plots]
 ```
-
-## Results
-
-**Pending.** The numbers must come from a native run on an Apple M4 (4P + 6E cores, 16 GB). The code is tested in CI and on synthetic vectors, and those synthetic runs are not results. After the run, `results/summary.md` and the two plots below are committed:
-
-- `results/recall_vs_latency.png`: recall@10 against p95 single-query latency, with the Pareto front
-- `results/recall_vs_memory.png`: recall@10 against total memory
-- `results/summary.md`: three picks (max recall, fastest at recall ≥ 0.95, smallest at recall ≥ 0.90) and the scale table
-- `results/env.json`: Python, FAISS and BLAS versions, compile options, thread settings, dataset revision, power source, Low Power Mode, and swap at start and end
 
 ## Run
 
-Python 3.12 and [uv](https://docs.astral.sh/uv/):
+Use Python 3.12 and uv. Run commands from the repository root.
 
 ```bash
-uv sync
-uv run python vss.py prepare --source cohere --n 1000000   # reads only the emb column over HTTP
-uv run python vss.py run --scales 100000 250000 1000000     # full sweep at the largest scale
-uv run python vss.py report
-uv run --group dev pytest -q
+uv sync --locked --group dev
+uv run --locked python vss.py prepare --source cohere --n 1000000
+uv run --locked python vss.py run --scales 100000 250000 1000000
+uv run --locked python vss.py report
 ```
 
-No internet or not much time? `prepare --source synthetic --n 50000` generates clustered vectors, and the rest of the pipeline runs unchanged.
+`prepare` downloads the embedding column from the Cohere Wikipedia dataset. `--n` is the number of base vectors; another 1,000 vectors are loaded for queries. The full parameter sweep runs at the largest scale by default.
 
-Before a real run on a Mac: AC power, Low Power Mode off, other apps closed, and `sysctl vm.swapusage` showing no swap in use (`env.json` records it at start). Searches run single-threaded (`OMP_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS` and FAISS's own OpenMP setting are all pinned to 1). Index builds use every core and are timed separately.
+### Small synthetic run
 
-Reports use the completed run manifest and a fingerprint of the prepared vectors. A partial run or a changed dataset is rejected; CSV files left by older scale selections are excluded.
+After installing dependencies, this example needs no dataset download:
+
+```bash
+uv run --locked python vss.py prepare --source synthetic --n 3000 --dim 64
+uv run --locked python vss.py run --scales 1000 3000 --runs 1
+uv run --locked python vss.py report
+```
+
+The selected scales must fit within the prepared base. These small sizes and one timing repetition keep the smoke test short; they are not the settings for the real benchmark.
+
+Prepared data and results live in `data/` and `results/` under the working directory. Preparing another dataset replaces the prepared vectors and clears cached ground truth. Preserve any real benchmark artifacts before using the same directory for synthetic runs.
+
+### Tests
+
+```bash
+uv run --locked --group dev pytest -q
+```
+
+CI runs the tests and the synthetic prepare/run/report sequence above.
 
 ## Method
 
-- **Data:** [`Cohere/wikipedia-22-12-en-embeddings`](https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings), first shards until 1,001,000 vectors at a pinned dataset revision, L2-normalized, shuffled with a fixed seed. The first 1,000 are queries, the rest is the base. Smaller scales are prefixes of the shuffled base, so every scale uses the same queries.
-- **Ground truth:** exact inner-product top-10 per scale (`faiss.knn`), cached in `data/`.
-- **Graphs:** the full M × efConstruction sweep runs at the largest scale. Smaller scales build M=32, efConstruction=200 only, and the scale table uses that graph at every scale.
-- **Latency:** 100 warm-up queries, then 1,000 single-query searches timed individually, in a fresh random order on each of 3 runs; the table reports the median of the three p50 and p95 values. Batch QPS (all 1,000 queries in one call, one thread) is also the median of 3 runs.
-- **Order:** index builds and each sweep's parameter order are shuffled with a fixed seed, so drift (thermal, background load) doesn't line up with one configuration.
-- **Memory:** serialized index size; for binary, plus the float32 vectors it rescores against.
+### Data and ground truth
+
+The real dataset is `Cohere/wikipedia-22-12-en-embeddings`, with 768-dimensional document embeddings. Preparation resolves the dataset's current revision, reads the first sorted shards at that revision, and records it in `data/source.json`. It does not pin every future preparation to the same revision.
+
+For the million-vector run, 1,001,000 vectors are L2-normalized and shuffled with seed 0. The first 1,000 become queries; the rest form the base. Smaller scales use prefixes of that base and the same queries.
+
+Exact inner-product top-10 results are computed separately for each scale with `faiss.knn` and cached in `data/`. On normalized vectors, inner product gives the same ordering as cosine similarity. Recall@10 is the mean fraction of these exact neighbours returned by each index.
+
+### Parameters
+
+| Index | Parameters swept |
+|---|---|
+| Float32 HNSW, largest scale | `M`: 16, 32, 64; `efConstruction`: 100, 200; `efSearch`: 16, 32, 64, 128, 256, 512 |
+| Float32 HNSW, smaller scales | `M=32`, `efConstruction=200`; the same `efSearch` sweep |
+| HNSW-SQ8, every scale | `M=32`, `efConstruction=200`; the same `efSearch` sweep |
+| Binary with rescoring, every scale | Candidate oversampling: 1, 2, 4, 8, 16, 32 times the requested top 10, capped at the base size |
+
+SQ8 trains on up to the first 100,000 base vectors. The scale table uses the common HNSW configuration, `M=32` and `efConstruction=200`, so its rows compare the same graph settings across scales.
+
+### Timing and storage
+
+- **Search:** one thread, with BLAS/OpenMP environment settings and FAISS's search thread count fixed to 1.
+- **Build:** timed separately, with FAISS's OpenMP thread count set to the detected CPU count. BLAS thread settings remain fixed to 1.
+- **Latency:** 100 warm-up queries, followed by 1,000 individually timed queries in a new deterministic random order for each repetition. Default runs use three repetitions and report the median p50 and p95.
+- **Throughput:** all 1,000 queries in one batch, using one search thread; batch QPS is the median across repetitions.
+- **Order:** index builds and parameter settings are shuffled with a fixed seed to reduce alignment between a configuration and gradual machine drift.
+- **Storage:** serialized index size plus the float32 rescoring store for the binary method. This is not peak process memory or total memory needed during preparation and building.
+
+For a native Mac benchmark, use AC power, disable Low Power Mode and minimise competing work. `results/env.json` records the platform, library versions, FAISS compile options and thread settings. On macOS, it also records the CPU, power source, Low Power Mode and swap at the start and end. Interpret timings alongside those conditions.
+
+## Reports
+
+A completed run produces:
+
+| File | Contents |
+|---|---|
+| `results/runs_<scale>.csv` | Recall, latency, throughput, build time and storage for each configuration |
+| `results/run_manifest.json` | Selected scales, prepared-data fingerprint and completion status |
+| `results/env.json` | Software, hardware and run conditions |
+| `results/summary.md` | Maximum-recall choice, fastest choice at recall ≥ 0.95, smallest choice at recall ≥ 0.90, and a scale comparison |
+| `results/recall_vs_latency.png` | Recall against p95 single-query latency, with the Pareto front |
+| `results/recall_vs_memory.png` | Recall against serialized index size plus rescoring storage, with the Pareto front |
+
+The plots and configuration picks use the largest measured scale. The report refuses an incomplete run or prepared data whose fingerprint changed after the run. It reads only the scales listed in the run manifest, excluding CSV files left by older scale selections.
 
 ## Limitations
 
-- Queries are held-out document vectors, not real search queries. That flatters recall compared with production traffic.
-- ARM NEON numbers aren't comparable to published x86 benchmarks.
-- The first shards of one Wikipedia dump aren't a uniform sample of it; shuffling only randomizes within what was downloaded.
-- Single-query latency on a laptop with efficiency cores is noisy; the 3-run median reduces this but doesn't remove it.
-- 5M vectors (about 15 GB as float32) doesn't fit the 16 GB machine, so it isn't measured.
+- Queries are held-out document embeddings rather than embeddings of real user questions. Recall in this experiment does not measure answer quality in a retrieval system.
+- The first dataset shards are not a uniform sample of the full Wikipedia collection. Shuffling changes order within the downloaded sample.
+- Laptop temperature, background activity and scheduling can affect latency. Repetitions reduce noise without removing it.
+- Measurements depend on the hardware and FAISS build. They should not be treated as results for a different architecture or server.
+- Reported storage excludes temporary arrays and build overhead. Larger scales need more memory than the final index size suggests.
+- The run manifest checks completion and prepared-data identity; it is not an integrity check on every result row or a record of the code revision.
