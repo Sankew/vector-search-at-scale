@@ -11,6 +11,7 @@ for _var in ("OMP_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "OPENBLAS_NUM_THREADS"
     os.environ[_var] = "1"
 
 import argparse  # noqa: E402 (every import below must follow the thread pinning above)
+import hashlib  # noqa: E402
 import csv  # noqa: E402
 import json  # noqa: E402
 import platform  # noqa: E402
@@ -103,7 +104,9 @@ class BinaryRescore:
         self.oversample = 1
 
     def search(self, queries: np.ndarray, k: int = K) -> np.ndarray:
-        _, candidates = self.index.search(np.packbits(queries > 0, axis=1), k * self.oversample)
+        if not 0 < k <= len(self.base):
+            raise ValueError("k must be between 1 and the number of base vectors")
+        _, candidates = self.index.search(np.packbits(queries > 0, axis=1), min(len(self.base), k * self.oversample))
         vectors = self.base[candidates.ravel()].reshape(*candidates.shape, -1)
         scores = np.einsum("qcd,qd->qc", vectors, queries)
         best = np.argsort(-scores, axis=1)[:, :k]
@@ -206,6 +209,9 @@ def run(scales: list[int], full_sweep_at: int | None, runs: int) -> None:
     if max(scales) > len(base_all):
         raise SystemExit(f"base.npy holds {len(base_all):,} vectors; rerun prepare with a larger --n")
     RESULTS.mkdir(exist_ok=True)
+    manifest_path = RESULTS / "run_manifest.json"
+    manifest = {"scales": scales, "data_fingerprint": data_fingerprint(), "complete": False}
+    manifest_path.write_text(json.dumps(manifest, indent=2))
     env = environment()
     (RESULTS / "env.json").write_text(json.dumps(env, indent=2) + "\n")
     rng = random.Random(SEED)
@@ -246,6 +252,33 @@ def run(scales: list[int], full_sweep_at: int | None, runs: int) -> None:
         env["swap_at_end"] = shell("sysctl", "-n", "vm.swapusage")
         (RESULTS / "env.json").write_text(json.dumps(env, indent=2) + "\n")
 
+    manifest["complete"] = True
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+
+def data_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for name in ("base.npy", "queries.npy", "source.json"):
+        path = DATA / name
+        if not path.exists():
+            raise SystemExit(f"{path} is missing; complete prepare before running or reporting")
+        with path.open("rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def report_paths() -> list[Path]:
+    path = RESULTS / "run_manifest.json"
+    if not path.exists():
+        raise SystemExit("No run manifest; complete run before reporting")
+    manifest = json.loads(path.read_text())
+    if not manifest["complete"]:
+        raise SystemExit("The latest benchmark run is incomplete; complete run before reporting")
+    if manifest["data_fingerprint"] != data_fingerprint():
+        raise SystemExit("Prepared data changed after the benchmark; rerun before reporting")
+    return [RESULTS / f"runs_{scale}.csv" for scale in manifest["scales"]]
+
 
 def pareto(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """Points no other point beats on both cost (lower x) and recall (higher y)."""
@@ -282,7 +315,7 @@ def report() -> None:
     from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
     rows = []
-    for path in sorted(RESULTS.glob("runs_*.csv")):
+    for path in report_paths():
         with path.open() as f:
             rows += [{k: (v if k == "kind" else float(v) if v else None) for k, v in r.items()} for r in csv.DictReader(f)]
     for r in rows:

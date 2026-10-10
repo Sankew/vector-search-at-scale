@@ -42,6 +42,8 @@ No internet or not much time? `prepare --source synthetic --n 50000` generates c
 
 Before a real run on a Mac: AC power, Low Power Mode off, other apps closed, and `sysctl vm.swapusage` showing no swap in use (`env.json` records it at start). Searches run single-threaded (`OMP_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS` and FAISS's own OpenMP setting are all pinned to 1). Index builds use every core and are timed separately.
 
+Reports use the completed run manifest and a fingerprint of the prepared vectors. A partial run or a changed dataset is rejected; CSV files left by older scale selections are excluded.
+
 ## Method
 
 - **Data:** [`Cohere/wikipedia-22-12-en-embeddings`](https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings), first shards until 1,001,000 vectors at a pinned dataset revision, L2-normalized, shuffled with a fixed seed. The first 1,000 are queries, the rest is the base. Smaller scales are prefixes of the shuffled base, so every scale uses the same queries.

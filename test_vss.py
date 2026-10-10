@@ -65,3 +65,30 @@ def test_pareto_and_picks():
     ]
     picks = list(vss.pick(rows).values())
     assert picks == [rows[0], rows[1], rows[2]]
+
+
+def test_binary_candidate_search_does_not_pad_with_invalid_ids():
+    base, queries = unit(20, 32), unit(5, 32, seed=4)
+    index = vss.build("binary", base)
+    assert vss.recall(vss.searcher(index, 32)(queries), vss.ground_truth(base, queries)) == 1.0
+
+
+def test_report_rejects_stale_or_incomplete_runs(tmp_path, monkeypatch):
+    import json
+    import pytest
+    monkeypatch.setattr(vss, "DATA", tmp_path / "data")
+    monkeypatch.setattr(vss, "RESULTS", tmp_path / "results")
+    vss.DATA.mkdir();vss.RESULTS.mkdir()
+    for name in ("base.npy", "queries.npy", "source.json"):
+        (vss.DATA/name).write_bytes(b"test")
+    manifest = {"scales": [100], "data_fingerprint": vss.data_fingerprint(), "complete": True}
+    path = vss.RESULTS/"run_manifest.json"
+    path.write_text(json.dumps(manifest))
+    (vss.RESULTS/"runs_1000000.csv").write_text("obsolete")
+    assert vss.report_paths() == [vss.RESULTS/"runs_100.csv"]
+    (vss.DATA/"queries.npy").write_bytes(b"new queries")
+    with pytest.raises(SystemExit, match="Prepared data changed"):
+        vss.report_paths()
+    manifest["complete"]=False;path.write_text(json.dumps(manifest))
+    with pytest.raises(SystemExit, match="incomplete"):
+        vss.report_paths()
