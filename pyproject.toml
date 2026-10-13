@@ -1,0 +1,12 @@
+[project]
+name = "vector-search-at-scale"
+version = "0.1.0"
+description = "Recall, latency and memory trade-offs of FAISS HNSW, SQ8 and binary indexes on 1M real embeddings"
+requires-python = ">=3.12,<3.13"
+dependencies = ["faiss-cpu", "numpy", "matplotlib", "pyarrow", "huggingface-hub"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
