@@ -41,7 +41,7 @@ uv run --locked python vss.py run --scales 100000 250000 1000000
 uv run --locked python vss.py report
 ```
 
-`prepare` downloads the embedding column from the Cohere Wikipedia dataset. `--n` is the number of base vectors; another 1,000 vectors are loaded for queries. The full parameter sweep runs at the largest scale by default.
+`prepare` downloads the embedding column from the English subset of Cohere's Wikipedia embeddings. `--n` is the number of base vectors; another 1,000 vectors are loaded for queries. The full parameter sweep runs at the largest scale by default. If a run is interrupted, `run --resume` with the same scales keeps every configuration that finished and redoes the rest.
 
 ### Small synthetic run
 
@@ -69,7 +69,7 @@ CI runs the tests and the synthetic prepare/run/report sequence above.
 
 ### Data and ground truth
 
-The real dataset is `Cohere/wikipedia-22-12-en-embeddings`, with 768-dimensional document embeddings. Preparation resolves the dataset's current revision, reads the first sorted shards at that revision, and records it in `data/source.json`. It does not pin every future preparation to the same revision.
+The real dataset is the English subset of `CohereLabs/wikipedia-2023-11-embed-multilingual-v3`: Wikipedia passages embedded with Cohere's `embed-multilingual-v3` model, 1,024 dimensions. The benchmark was first written for `Cohere/wikipedia-22-12-en-embeddings` (768 dimensions), which Hugging Face no longer serves. Preparation resolves the dataset's current revision, reads the first sorted English shards at that revision, and records it in `data/source.json`. It does not pin every future preparation to the same revision.
 
 For the million-vector run, 1,001,000 vectors are L2-normalized and shuffled with seed 0. The first 1,000 become queries; the rest form the base. Smaller scales use prefixes of that base and the same queries.
 

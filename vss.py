@@ -27,7 +27,8 @@ import numpy as np  # noqa: E402
 
 DATA, RESULTS = Path("data"), Path("results")
 K, N_QUERIES, SEED = 10, 1000, 0
-COHERE = "Cohere/wikipedia-22-12-en-embeddings"
+# Cohere/wikipedia-22-12-en-embeddings (768-d) was taken down in 2026; this is its successor from the same publisher.
+COHERE, SUBSET = "CohereLabs/wikipedia-2023-11-embed-multilingual-v3", "en"
 EF_SEARCH = (16, 32, 64, 128, 256, 512)
 OVERSAMPLE = (1, 2, 4, 8, 16, 32)
 FULL_SWEEP = [(m, efc) for m in (16, 32, 64) for efc in (100, 200)]
@@ -47,7 +48,7 @@ def load_cohere(n: int, revision: str) -> np.ndarray:
 
     fs = HfFileSystem()
     out, filled = None, 0
-    for path in sorted(fs.glob(f"datasets/{COHERE}@{revision}/**/*.parquet")):
+    for path in sorted(fs.glob(f"datasets/{COHERE}@{revision}/{SUBSET}/*.parquet")):
         vectors = embeddings(pq.read_table(path, columns=["emb"], filesystem=fs))
         if out is None:
             out = np.empty((n, vectors.shape[1]), np.float32)
@@ -81,7 +82,7 @@ def prepare(source: str, n: int, dim: int) -> None:
     order = np.random.default_rng(SEED).permutation(len(vectors))
     np.save(DATA / "queries.npy", vectors[order[:N_QUERIES]])
     np.save(DATA / "base.npy", vectors[order[N_QUERIES:]])
-    (DATA / "source.json").write_text(json.dumps({"source": source, "dataset": COHERE if source == "cohere" else None,
+    (DATA / "source.json").write_text(json.dumps({"source": source, "dataset": f"{COHERE}/{SUBSET}" if source == "cohere" else None,
                                                   "revision": revision, "vectors": len(vectors), "seed": SEED}))
 
 
@@ -200,7 +201,16 @@ def shell(*command: str) -> str:
     return subprocess.run(command, capture_output=True, text=True).stdout.strip()
 
 
-def run(scales: list[int], full_sweep_at: int | None, runs: int) -> None:
+def completed_rows(path: Path) -> dict[tuple, list[dict]]:
+    """Rows already measured in a runs CSV, grouped by configuration (kind, m, ef_construction)."""
+    groups: dict[tuple, list[dict]] = {}
+    if path.exists():
+        for row in csv.DictReader(path.open()):
+            groups.setdefault((row["kind"], row["m"], row["ef_construction"]), []).append(row)
+    return groups
+
+
+def run(scales: list[int], full_sweep_at: int | None, runs: int, resume: bool = False) -> None:
     base_all = np.load(DATA / "base.npy", mmap_mode="r")
     queries = np.load(DATA / "queries.npy")
     full_sweep_at = full_sweep_at or max(scales)
@@ -211,13 +221,18 @@ def run(scales: list[int], full_sweep_at: int | None, runs: int) -> None:
     RESULTS.mkdir(exist_ok=True)
     manifest_path = RESULTS / "run_manifest.json"
     manifest = {"scales": scales, "data_fingerprint": data_fingerprint(), "complete": False}
+    if resume:
+        previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+        if {k: previous.get(k) for k in ("scales", "data_fingerprint")} != {k: manifest[k] for k in ("scales", "data_fingerprint")}:
+            raise SystemExit("Nothing to resume: the last run used other scales or other prepared data")
     manifest_path.write_text(json.dumps(manifest, indent=2))
-    env = environment()
+    env = json.loads((RESULTS / "env.json").read_text()) if resume and (RESULTS / "env.json").exists() else environment()
     (RESULTS / "env.json").write_text(json.dumps(env, indent=2) + "\n")
     rng = random.Random(SEED)
     fields = ["scale", "kind", "m", "ef_construction", "param", "build_s", "index_mb", "rescore_mb",
               "total_mb", "recall", "p50_ms", "p95_ms", "batch_qps"]
     for scale in scales:
+        done = completed_rows(RESULTS / f"runs_{scale}.csv") if resume else {}
         with (RESULTS / f"runs_{scale}.csv").open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fields)
             writer.writeheader()
@@ -230,14 +245,19 @@ def run(scales: list[int], full_sweep_at: int | None, runs: int) -> None:
             configs = [("hnsw", *g) for g in graphs] + [("hnsw_sq8", *DEFAULT_GRAPH), ("binary", None, None)]
             rng.shuffle(configs)
             for kind, m, efc in configs:
+                params = list(OVERSAMPLE if kind == "binary" else EF_SEARCH)
+                rng.shuffle(params)
+                previous = done.get((kind, "" if m is None else str(m), "" if efc is None else str(efc)), [])
+                if {int(r["param"]) for r in previous} == set(params):  # measured before an interruption: keep it
+                    writer.writerows(previous)
+                    f.flush()
+                    continue
                 faiss.omp_set_num_threads(os.cpu_count() or 1)  # builds are not timed against searches
                 start = time.perf_counter()
                 index = build(kind, base, m or 0, efc or 0)
                 build_s = time.perf_counter() - start
                 faiss.omp_set_num_threads(1)
                 index_bytes, rescore_bytes = sizes(index, base, DATA / "scratch.index")
-                params = list(OVERSAMPLE if kind == "binary" else EF_SEARCH)
-                rng.shuffle(params)
                 for param in params:
                     row = {"scale": scale, "kind": kind, "m": m, "ef_construction": efc, "param": param,
                            "build_s": round(build_s, 1), "index_mb": round(index_bytes / 2**20, 1),
@@ -390,12 +410,14 @@ def main() -> None:
     r.add_argument("--scales", type=int, nargs="+", default=[100_000, 250_000, 1_000_000])
     r.add_argument("--full-sweep-at", type=int, help="scale for the full M x efConstruction sweep (default: largest)")
     r.add_argument("--runs", type=int, default=3)
+    r.add_argument("--resume", action="store_true",
+                   help="keep configurations already measured by an interrupted run with the same scales and data")
     sub.add_parser("report", help="plots + results/summary.md from results/runs.csv")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.source, args.n, args.dim)
     elif args.command == "run":
-        run(args.scales, args.full_sweep_at, args.runs)
+        run(args.scales, args.full_sweep_at, args.runs, args.resume)
     else:
         report()
 

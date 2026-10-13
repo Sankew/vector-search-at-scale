@@ -92,3 +92,28 @@ def test_report_rejects_stale_or_incomplete_runs(tmp_path, monkeypatch):
     manifest["complete"]=False;path.write_text(json.dumps(manifest))
     with pytest.raises(SystemExit, match="incomplete"):
         vss.report_paths()
+
+
+def test_resume_keeps_finished_configurations_and_redoes_partial_ones(tmp_path, monkeypatch):
+    import csv
+    import json
+    monkeypatch.setattr(vss, "DATA", tmp_path / "data")
+    monkeypatch.setattr(vss, "RESULTS", tmp_path / "results")
+    vss.prepare("synthetic", 2000, 16)
+    vss.run([2000], None, runs=1)
+    path = vss.RESULTS / "runs_2000.csv"
+    rows = list(csv.DictReader(path.open()))
+    binary = [r for r in rows if r["kind"] == "binary"]
+    kept = [r for r in rows if r["kind"] != "binary"] + binary[:2]  # interrupted halfway through binary
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(kept)
+    built = []
+    original = vss.build
+    monkeypatch.setattr(vss, "build", lambda kind, *a: built.append(kind) or original(kind, *a))
+    vss.run([2000], None, runs=1, resume=True)
+    assert built == ["binary"]
+    resumed = list(csv.DictReader(path.open()))
+    assert len(resumed) == len(rows) and sum(r["kind"] == "binary" for r in resumed) == len(vss.OVERSAMPLE)
+    assert json.loads((vss.RESULTS / "run_manifest.json").read_text())["complete"]
