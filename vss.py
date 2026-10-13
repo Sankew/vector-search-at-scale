@@ -350,7 +350,7 @@ def report() -> None:
               "binary": ("Binary + float rescore", "#1baf7a", "^")}
     surface, ink, muted, grid = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
     for x_key, x_label, name, log in (("p95_ms", "p95 single-query latency (ms, log scale)", "recall_vs_latency", True),
-                                      ("total_mb", "memory incl. rescoring store (MB)", "recall_vs_memory", False)):
+                                      ("total_mb", "memory incl. rescoring store (MiB)", "recall_vs_memory", False)):
         fig, ax = plt.subplots(figsize=(7.5, 4.5), dpi=150, facecolor=surface)
         ax.set_facecolor(surface)
         for kind, (title, color, marker) in styles.items():
@@ -379,7 +379,7 @@ def report() -> None:
         fig.savefig(RESULTS / f"{name}.png", facecolor=surface)
         plt.close(fig)
 
-    lines = [f"## {top:,} vectors", "", "| Pick | Configuration | recall@10 | p95 ms | Memory MB | Batch QPS |",
+    lines = [f"## {top:,} vectors", "", "| Pick | Configuration | recall@10 | p95 ms | Memory MiB | Batch QPS |",
              "|---|---|---:|---:|---:|---:|"]
     for title, r in pick(at_top).items():
         lines.append(f"| {title} | {label(r)} | {r['recall']:.3f} | {r['p95_ms']:.2f} | {r['total_mb']:,.0f} | "
